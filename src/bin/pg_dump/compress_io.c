@@ -91,23 +91,25 @@ struct CompressorState
 	CompressionAlgorithm comprAlg;
 	WriteFunc	writeF;
 
+	union {
 #ifdef HAVE_LIBZ
-	z_streamp	zp;
-	char	   *zlibOut;
-	size_t		zlibOutSize;
+		struct {
+			z_streamp	zp;
+			char	   *zlibOut;
+			size_t		zlibOutSize;
+		} zlib;
 #endif
 
 #ifdef HAVE_LIBZSTD
-	union {
+		/* This is used for compression but not decompression */
 		struct {
-			ZSTD_outBuffer output;
-			ZSTD_inBuffer input;
 			// XXX: use one separate ZSTD_CStream per thread: disable on windows ?
-			ZSTD_CStream *cstream;
+			ZSTD_CStream	*cstream;
+			ZSTD_outBuffer	output;
+			ZSTD_inBuffer	input;
 		} zstd;
-	} u;
 #endif
-
+	} u;
 };
 
 /* Routines that support zlib compressed data I/O */
@@ -452,7 +454,7 @@ InitCompressorZlib(CompressorState *cs, Compress *compress)
 {
 	z_streamp	zp;
 
-	zp = cs->zp = (z_streamp) pg_malloc(sizeof(z_stream));
+	zp = cs->u.zlib.zp = (z_streamp) pg_malloc(sizeof(z_stream));
 	zp->zalloc = Z_NULL;
 	zp->zfree = Z_NULL;
 	zp->opaque = Z_NULL;
@@ -462,22 +464,22 @@ InitCompressorZlib(CompressorState *cs, Compress *compress)
 	 * actually allocate one extra byte because some routines want to append a
 	 * trailing zero byte to the zlib output.
 	 */
-	cs->zlibOut = (char *) pg_malloc(ZLIB_OUT_SIZE + 1);
-	cs->zlibOutSize = ZLIB_OUT_SIZE;
+	cs->u.zlib.zlibOut = (char *) pg_malloc(ZLIB_OUT_SIZE + 1);
+	cs->u.zlib.zlibOutSize = ZLIB_OUT_SIZE;
 
 	if (deflateInit(zp, compress->level) != Z_OK)
 		fatal("could not initialize compression library: %s",
 			  zp->msg);
 
 	/* Just be paranoid - maybe End is called after Start, with no Write */
-	zp->next_out = (void *) cs->zlibOut;
-	zp->avail_out = cs->zlibOutSize;
+	zp->next_out = (void *) cs->u.zlib.zlibOut;
+	zp->avail_out = cs->u.zlib.zlibOutSize;
 }
 
 static void
 EndCompressorZlib(ArchiveHandle *AH, CompressorState *cs)
 {
-	z_streamp	zp = cs->zp;
+	z_streamp	zp = cs->u.zlib.zp;
 
 	zp->next_in = NULL;
 	zp->avail_in = 0;
@@ -488,23 +490,23 @@ EndCompressorZlib(ArchiveHandle *AH, CompressorState *cs)
 	if (deflateEnd(zp) != Z_OK)
 		fatal("could not close compression stream: %s", zp->msg);
 
-	free(cs->zlibOut);
-	free(cs->zp);
+	free(cs->u.zlib.zlibOut);
+	free(cs->u.zlib.zp);
 }
 
 static void
 DeflateCompressorZlib(ArchiveHandle *AH, CompressorState *cs, bool flush)
 {
-	z_streamp	zp = cs->zp;
-	char	   *out = cs->zlibOut;
+	z_streamp	zp = cs->u.zlib.zp;
+	char	   *out = cs->u.zlib.zlibOut;
 	int			res = Z_OK;
 
-	while (cs->zp->avail_in != 0 || flush)
+	while (cs->u.zlib.zp->avail_in != 0 || flush)
 	{
 		res = deflate(zp, flush ? Z_FINISH : Z_NO_FLUSH);
 		if (res == Z_STREAM_ERROR)
 			fatal("could not compress data: %s", zp->msg);
-		if ((flush && (zp->avail_out < cs->zlibOutSize))
+		if ((flush && (zp->avail_out < cs->u.zlib.zlibOutSize))
 			|| (zp->avail_out == 0)
 			|| (zp->avail_in != 0)
 			)
@@ -514,18 +516,18 @@ DeflateCompressorZlib(ArchiveHandle *AH, CompressorState *cs, bool flush)
 			 * chunk is the EOF marker in the custom format. This should never
 			 * happen but...
 			 */
-			if (zp->avail_out < cs->zlibOutSize)
+			if (zp->avail_out < cs->u.zlib.zlibOutSize)
 			{
 				/*
 				 * Any write function should do its own error checking but to
 				 * make sure we do a check here as well...
 				 */
-				size_t		len = cs->zlibOutSize - zp->avail_out;
+				size_t		len = cs->u.zlib.zlibOutSize - zp->avail_out;
 
 				cs->writeF(AH, out, len);
 			}
 			zp->next_out = (void *) out;
-			zp->avail_out = cs->zlibOutSize;
+			zp->avail_out = cs->u.zlib.zlibOutSize;
 		}
 
 		if (res == Z_STREAM_END)
@@ -537,8 +539,8 @@ static void
 WriteDataToArchiveZlib(ArchiveHandle *AH, CompressorState *cs,
 					   const char *data, size_t dLen)
 {
-	cs->zp->next_in = (void *) unconstify(char *, data);
-	cs->zp->avail_in = dLen;
+	cs->u.zlib.zp->next_in = (void *) unconstify(char *, data);
+	cs->u.zlib.zp->avail_in = dLen;
 	DeflateCompressorZlib(AH, cs, false);
 }
 
@@ -898,7 +900,7 @@ cfdopen(int fd, const char *mode, Compress *compression)
 			fp = NULL;
 		}
 		else
-			setvbuf(fp->uncompressedfp, NULL, _IONBF, 0);
+			setvbuf(fp->u.fp, NULL, _IONBF, 0);
 		return fp;
 
 	default:
