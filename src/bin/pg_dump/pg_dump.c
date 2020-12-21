@@ -416,7 +416,7 @@ parse_compression(const char *optarg, Compress *compress)
 			const int default_compress_level[] = {
 				0,			/* COMPR_ALG_NONE */
 				Z_DEFAULT_COMPRESSION,	/* COMPR_ALG_ZLIB */
-				0, // XXX: ZSTD_CLEVEL_DEFAULT,	/* COMPR_ALG_ZSTD */
+				0, // #ifdef LIBZSTD ZSTD_CLEVEL_DEFAULT,	/* COMPR_ALG_ZSTD */
 			};
 
 			compress->level = default_compress_level[compress->alg];
