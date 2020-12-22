@@ -1277,12 +1277,14 @@ _tarGetHeader(ArchiveHandle *AH, TAR_MEMBER *th)
 
 	if (chk != sum)
 	{
-		char		posbuf[32];
+		off_t		off = ftello(ctx->tarFH);
 
-		snprintf(posbuf, sizeof(posbuf), UINT64_FORMAT,
-				 (uint64) ftello(ctx->tarFH));
-		fatal("corrupt tar header found in %s (expected %d, computed %d) file position %s",
-			  tag, sum, chk, posbuf);
+		if (off == -1)
+			fatal("corrupt tar header found in %s (expected %d, computed %d)",
+				  tag, sum, chk);
+		else
+			fatal("corrupt tar header found in %s (expected %d, computed %d) file position " UINT64_FORMAT,
+				  tag, sum, chk, off);
 	}
 
 	th->targetFile = pg_strdup(tag);
