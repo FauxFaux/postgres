@@ -65,6 +65,18 @@ compresslibs[] = {
 	{ COMPR_ALG_LIBZ, "libz", ".gz", Z_DEFAULT_COMPRESSION },
 	{ COMPR_ALG_LIBZ, "zlib", ".gz", Z_DEFAULT_COMPRESSION }, /* Alternate name */
 
+#ifdef HAVE_LIBZSTD
+	/*
+	 * ZSTD doesen't have a #define for it, but 0 means "the current default".
+	 * Note that ZSTD_CLEVEL_DEFAULT is currently defined to 3.
+	 *
+	 * Block size should be ZSTD_DStreamOutSize(), but needs to be
+	 * constant, so use ZSTD_BLOCKSIZE_MAX (128kB)
+	 */
+	{ COMPR_ALG_ZSTD, "zst",  ".zst", 0 },
+	{ COMPR_ALG_ZSTD, "zstd", ".zst", 0 }, /* Alternate name */
+#endif /* HAVE_LIBZSTD */
+
 	{ 0, NULL, } /* sentinel */
 };
 
@@ -84,6 +96,18 @@ struct CompressorState
 	char	   *zlibOut;
 	size_t		zlibOutSize;
 #endif
+
+#ifdef HAVE_LIBZSTD
+	union {
+		struct {
+			ZSTD_outBuffer output;
+			ZSTD_inBuffer input;
+			// XXX: use one separate ZSTD_CStream per thread: disable on windows ?
+			ZSTD_CStream *cstream;
+		} zstd;
+	} u;
+#endif
+
 };
 
 /* Routines that support zlib compressed data I/O */
@@ -95,6 +119,15 @@ static void ReadDataFromArchiveZlib(ArchiveHandle *AH, ReadFunc readF);
 static void WriteDataToArchiveZlib(ArchiveHandle *AH, CompressorState *cs,
 								   const char *data, size_t dLen);
 static void EndCompressorZlib(ArchiveHandle *AH, CompressorState *cs);
+#endif
+
+#ifdef HAVE_LIBZSTD
+static ZSTD_CStream *ZstdCStreamParams(Compress *compress);
+static void InitCompressorZstd(CompressorState *cs, Compress *compress);
+static void EndCompressorZstd(ArchiveHandle *AH, CompressorState *cs);
+static void WriteDataToArchiveZstd(ArchiveHandle *AH, CompressorState *cs,
+					   const char *data, size_t dLen);
+static void ReadDataFromArchiveZstd(ArchiveHandle *AH, ReadFunc readF);
 #endif
 
 /* Routines that support uncompressed data I/O */
@@ -125,6 +158,13 @@ AllocateCompressor(Compress *compression, WriteFunc writeF)
 		InitCompressorZlib(cs, compression);
 		break;
 #endif
+
+#ifdef HAVE_LIBZSTD
+	case COMPR_ALG_ZSTD:
+		InitCompressorZstd(cs, compression);
+		break;
+#endif
+
 	case COMPR_ALG_NONE:
 		/* Do nothing */
 		break;
@@ -153,6 +193,13 @@ ReadDataFromArchive(ArchiveHandle *AH, ReadFunc readF)
 		ReadDataFromArchiveZlib(AH, readF);
 		break;
 #endif
+
+#ifdef HAVE_LIBZSTD
+	case COMPR_ALG_ZSTD:
+		ReadDataFromArchiveZstd(AH, readF);
+		break;
+#endif
+
 	default:
 		/* Should not happen */
 		fatal("requested compression not available in this installation");
@@ -171,6 +218,12 @@ WriteDataToArchive(ArchiveHandle *AH, CompressorState *cs,
 #ifdef HAVE_LIBZ
 		case COMPR_ALG_LIBZ:
 			WriteDataToArchiveZlib(AH, cs, data, dLen);
+			break;
+#endif
+
+#ifdef HAVE_LIBZSTD
+		case COMPR_ALG_ZSTD:
+			WriteDataToArchiveZstd(AH, cs, data, dLen);
 			break;
 #endif
 		case COMPR_ALG_NONE:
@@ -193,10 +246,201 @@ EndCompressor(ArchiveHandle *AH, CompressorState *cs)
 	if (cs->comprAlg == COMPR_ALG_LIBZ)
 		EndCompressorZlib(AH, cs);
 #endif
+
+#ifdef HAVE_LIBZSTD
+	if (cs->comprAlg == COMPR_ALG_ZSTD)
+		EndCompressorZstd(AH, cs);
+#endif
+
 	free(cs);
 }
 
 /* Private routines, specific to each compression method. */
+
+#ifdef HAVE_LIBZSTD
+
+static void ZSTD_CCtx_setParam_or_die(ZSTD_CStream *cstream,
+		ZSTD_cParameter param, int value)
+
+{
+	size_t res;
+	res = ZSTD_CCtx_setParameter(cstream, param, value);
+	if (ZSTD_isError(res))
+		fatal("could not set compression parameter: %s",
+				ZSTD_getErrorName(res));
+}
+
+/* Return a compression stream with parameters set per argument */
+static ZSTD_CStream*
+ZstdCStreamParams(Compress *compress)
+{
+	ZSTD_CStream *cstream;
+	cstream = ZSTD_createCStream();
+	if (cstream == NULL)
+		fatal("could not initialize compression library");
+
+	if (compress->level != 0) // XXX: ZSTD_CLEVEL_DEFAULT
+	{
+		size_t res;
+		res = ZSTD_CCtx_setParameter(cstream,
+				ZSTD_c_compressionLevel, compress->level);
+		if (ZSTD_isError(res))
+			fatal("could not set compression level: %s",
+					ZSTD_getErrorName(res));
+	}
+
+	if (compress->zstd.longdistance) // XXX: ternary
+		ZSTD_CCtx_setParam_or_die(cstream,
+				ZSTD_c_enableLongDistanceMatching,
+				compress->zstd.longdistance);
+
+	if (compress->zstd.checksum)
+		ZSTD_CCtx_setParam_or_die(cstream, ZSTD_c_checksumFlag,
+				compress->zstd.checksum);
+
+// not supported in my library ?
+	if (compress->zstd.threads)
+		ZSTD_CCtx_setParam_or_die(cstream, ZSTD_c_nbWorkers,
+				compress->zstd.threads);
+
+#if 0
+	/* Still marked as experimental */
+	if (compress->zstd.rsyncable)
+		ZSTD_CCtx_setParam_or_die(cstream, ZSTD_c_rsyncable, 1);
+#endif
+
+	return cstream;
+}
+
+static void
+InitCompressorZstd(CompressorState *cs, Compress *compress)
+{
+	cs->u.zstd.cstream = ZstdCStreamParams(compress);
+	/* XXX: initialize safely like the corresponding zlib "paranoia" */
+	cs->u.zstd.output.size = ZSTD_CStreamOutSize();
+	cs->u.zstd.output.dst = pg_malloc(cs->u.zstd.output.size);
+	cs->u.zstd.output.pos = 0;
+}
+
+static void
+EndCompressorZstd(ArchiveHandle *AH, CompressorState *cs)
+{
+	ZSTD_outBuffer	*output = &cs->u.zstd.output;
+
+	for (;;)
+	{
+		size_t res;
+
+		res = ZSTD_compressStream2(cs->u.zstd.cstream, output,
+				&cs->u.zstd.input, ZSTD_e_end);
+
+		if (output->pos > 0)
+			cs->writeF(AH, output->dst, output->pos);
+
+		if (res == 0)
+			break;
+
+		if (ZSTD_isError(res))
+			fatal("could not close compression stream: %s",
+					ZSTD_getErrorName(res));
+	}
+
+	// XXX: retval
+	ZSTD_freeCStream(cs->u.zstd.cstream);
+}
+
+static void
+WriteDataToArchiveZstd(ArchiveHandle *AH, CompressorState *cs,
+					   const char *data, size_t dLen)
+{
+	ZSTD_inBuffer	*input = &cs->u.zstd.input;
+	ZSTD_outBuffer	*output = &cs->u.zstd.output;
+
+	input->src = (void *) unconstify(char *, data);
+	input->size = dLen;
+	input->pos = 0;
+
+	while (input->pos != input->size)
+	{
+		size_t		res;
+
+		res = ZSTD_compressStream2(cs->u.zstd.cstream, output,
+				input, ZSTD_e_continue);
+
+		if (output->pos == output->size ||
+				input->pos != input->size)
+		{
+			/*
+			 * Extra paranoia: avoid zero-length chunks, since a zero length
+			 * chunk is the EOF marker in the custom format. This should never
+			 * happen but...
+			 */
+			if (output->pos > 0)
+				cs->writeF(AH, output->dst, output->pos);
+
+			output->pos = 0;
+		}
+
+		if (ZSTD_isError(res))
+			fatal("could not compress data: %s", ZSTD_getErrorName(res));
+	}
+}
+
+/* Read data from a compressed zstd archive */
+static void
+ReadDataFromArchiveZstd(ArchiveHandle *AH, ReadFunc readF)
+{
+	ZSTD_DStream	*dstream;
+	ZSTD_outBuffer	output;
+	ZSTD_inBuffer	input;
+	size_t			res;
+	size_t			input_size;
+
+	dstream = ZSTD_createDStream();
+	if (dstream == NULL)
+		fatal("could not initialize compression library");
+
+	input_size = ZSTD_DStreamInSize();
+	input.src = pg_malloc(input_size);
+
+	output.size = ZSTD_DStreamOutSize();
+	output.dst = pg_malloc(output.size);
+
+	/* read compressed data */
+	for (;;)
+	{
+		size_t			cnt;
+
+		input.size = input_size; // XXX: the buffer can grow, we shouldn't keep resetting it to the original value..
+		cnt = readF(AH, (char **)unconstify(void **, &input.src), &input.size);
+		input.pos = 0;
+		input.size = cnt;
+
+		if (cnt == 0)
+			break;
+
+		while (input.pos < input.size)
+		{
+			/* decompress */
+			output.pos = 0;
+			res = ZSTD_decompressStream(dstream, &output, &input);
+
+			if (ZSTD_isError(res))
+				fatal("could not decompress data: %s", ZSTD_getErrorName(res));
+
+			/* write to output handle */
+			((char *)output.dst)[output.pos] = '\0';
+			ahwrite(output.dst, 1, output.pos, AH);
+			// if (res == 0)
+				// break;
+		}
+	}
+
+	pg_free(unconstify(void *, input.src));
+	pg_free(output.dst);
+}
+
+#endif		/* HAVE_LIBZSTD */
 
 #ifdef HAVE_LIBZ
 /*
@@ -411,6 +655,19 @@ struct cfp
 #ifdef HAVE_LIBZ
 	gzFile		compressedfp;
 #endif
+
+#ifdef HAVE_LIBZSTD // XXX: this should be a union with a CompressionAlgorithm alg?
+	/* This is a normal file to which we read/write compressed data */
+	struct {
+		FILE			*fp;
+		// XXX: use one separate ZSTD_CStream per thread: disable on windows ?
+		ZSTD_CStream	*cstream;
+		ZSTD_DStream	*dstream;
+		ZSTD_outBuffer	output;
+		ZSTD_inBuffer	input;
+	} zstd;
+#endif
+
 };
 
 static int	hasSuffix(const char *filename);
@@ -525,6 +782,31 @@ cfopen(const char *path, const char *mode, Compress *compression)
 		return fp;
 #endif
 
+#ifdef HAVE_LIBZSTD
+	case COMPR_ALG_ZSTD:
+		fp->zstd.fp = fopen(path, mode);
+		if (fp->zstd.fp == NULL)
+		{
+			free_keep_errno(fp);
+			fp = NULL;
+		}
+		else if (mode[0] == 'w' || mode[0] == 'a' ||
+			strchr(mode, '+') != NULL)
+		{
+			fp->zstd.output.size = ZSTD_CStreamOutSize();
+			fp->zstd.output.dst = pg_malloc0(fp->zstd.output.size);
+			fp->zstd.cstream = ZstdCStreamParams(compression);
+		}
+		else if (strchr(mode, 'r'))
+		{
+			fp->zstd.input.src = pg_malloc0(ZSTD_DStreamInSize());
+			fp->zstd.dstream = ZSTD_createDStream();
+			if (fp->zstd.dstream == NULL)
+				fatal("could not initialize compression library");
+		} // XXX else: bad mode
+		return fp;
+#endif
+
 	case COMPR_ALG_NONE:
 		fp->uncompressedfp = fopen(path, mode);
 		if (fp->uncompressedfp == NULL)
@@ -576,6 +858,31 @@ cfdopen(int fd, const char *mode, Compress *compression)
 		return fp;
 #endif
 
+#ifdef HAVE_LIBZSTD
+	case COMPR_ALG_ZSTD:
+		fp->zstd.fp = fdopen(fd, mode);
+		if (fp->zstd.fp == NULL)
+		{
+			free_keep_errno(fp);
+			fp = NULL;
+		}
+		else if (mode[0] == 'w' || mode[0] == 'a' ||
+			strchr(mode, '+') != NULL)
+		{
+			fp->zstd.output.size = ZSTD_CStreamOutSize();
+			fp->zstd.output.dst = pg_malloc0(fp->zstd.output.size);
+			fp->zstd.cstream = ZstdCStreamParams(compression);
+		}
+		else if (strchr(mode, 'r'))
+		{
+			fp->zstd.input.src = pg_malloc0(ZSTD_DStreamInSize());
+			fp->zstd.dstream = ZSTD_createDStream();
+			if (fp->zstd.dstream == NULL)
+				fatal("could not initialize compression library");
+		} // XXX else: bad mode
+		return fp;
+#endif
+
 	case COMPR_ALG_NONE:
 		fp->uncompressedfp = fdopen(fd, mode);
 		if (fp->uncompressedfp == NULL)
@@ -617,6 +924,68 @@ cfread(void *ptr, int size, cfp *fp)
 	}
 #endif
 
+#ifdef HAVE_LIBZSTD
+	if (fp->zstd.fp)
+	{
+		ZSTD_outBuffer	*output = &fp->zstd.output;
+		ZSTD_inBuffer	*input = &fp->zstd.input;
+		size_t			input_size = ZSTD_DStreamInSize();
+		/* input_size is the allocated size */
+		size_t			res, cnt;
+
+		output->size = size;
+		output->dst = ptr;
+		output->pos = 0;
+
+		for (;;)
+		{
+			Assert(input->pos <= input->size);
+			Assert(input->size <= input_size);
+
+			/* If the input is completely consumed, start back at the beginning */
+			if (input->pos == input->size)
+			{
+				/* input->size is size produced by "fread" */
+				input->size = 0;
+				/* input->pos is position consumed by decompress */
+				input->pos = 0;
+			}
+
+			/* read compressed data if we must produce more input */
+			if (input->pos == input->size)
+			{
+				cnt = fread(unconstify(void *, input->src), 1, input_size, fp->zstd.fp);
+				input->size = cnt;
+
+				/* If we have no input to consume, we're done */
+				if (cnt == 0)
+					break;
+			}
+
+			Assert(cnt >= 0);
+			Assert(input->size <= input_size);
+
+			/* Now consume as much as possible */
+			for ( ; input->pos < input->size; )
+			{
+				/* decompress */
+				res = ZSTD_decompressStream(fp->zstd.dstream, output, input);
+				if (res == 0)
+					break; /* End of frame */
+				if (output->pos == output->size)
+					break; /* No more room for output */
+				if (ZSTD_isError(res))
+					fatal("could not decompress data: %s", ZSTD_getErrorName(res));
+			}
+
+			if (output->pos == output->size)
+				break; /* We read all the data that fits */
+		}
+
+		return output->pos;
+	}
+#endif
+
 	ret = fread(ptr, 1, size, fp->uncompressedfp);
 	if (ret != size && !feof(fp->uncompressedfp))
 		READ_ERROR_EXIT(fp->uncompressedfp);
@@ -630,6 +999,35 @@ cfwrite(const void *ptr, int size, cfp *fp)
 	if (fp->compressedfp)
 		return gzwrite(fp->compressedfp, ptr, size);
 #endif
+
+#ifdef HAVE_LIBZSTD
+	if (fp->zstd.fp)
+	{
+		size_t      res, cnt;
+		ZSTD_outBuffer	*output = &fp->zstd.output;
+		ZSTD_inBuffer	*input = &fp->zstd.input;
+
+		input->src = ptr;
+		input->size = size;
+		input->pos = 0;
+
+		/* Consume all input, and flush later */
+		while (input->pos != input->size)
+		{
+			output->pos = 0;
+			res = ZSTD_compressStream2(fp->zstd.cstream, output, input, ZSTD_e_continue);
+			if (ZSTD_isError(res))
+				fatal("could not compress data: %s", ZSTD_getErrorName(res));
+
+			cnt = fwrite(output->dst, 1, output->pos, fp->zstd.fp);
+			if (cnt != output->pos)
+				fatal("could not write data: %s", strerror(errno));
+		}
+
+		return size;
+	}
+#endif
+
 	return fwrite(ptr, 1, size, fp->uncompressedfp);
 }
 
@@ -652,6 +1050,21 @@ cfgetc(cfp *fp)
 		return ret;
 	}
 #endif
+
+#ifdef HAVE_LIBZSTD
+	if (fp->zstd.fp)
+	{
+		if (cfread(&ret, 1, fp) != 1)
+		{
+			if (feof(fp->zstd.fp))
+				fatal("could not read from input file: end of file");
+			else
+				fatal("could not read from input file: %s", strerror(errno));
+		}
+		return ret;
+	}
+#endif
+
 	ret = fgetc(fp->uncompressedfp);
 	if (ret == EOF)
 		READ_ERROR_EXIT(fp->uncompressedfp);
@@ -665,6 +1078,31 @@ cfgets(cfp *fp, char *buf, int len)
 	if (fp->compressedfp)
 		return gzgets(fp->compressedfp, buf, len);
 #endif
+#ifdef HAVE_LIBZSTD
+	if (fp->zstd.fp)
+	{
+		/*
+		 * Read one byte at a time until newline or EOF.
+		 * This is only used to read the list of blobs, and the I/O is
+		 * buffered anyway.
+		 */
+		int i, res;
+		for (i = 0; i < len - 1; ++i)
+		{
+			res = cfread(&buf[i], 1, fp);
+			if (res != 1)
+				break;
+			if (buf[i] == '\n')
+			{
+				++i;
+				break;
+			}
+		}
+		buf[i] = '\0';
+		return i > 0 ? buf : 0;
+	}
+#endif
+
 	return fgets(buf, len, fp->uncompressedfp);
 }
 
@@ -689,6 +1127,44 @@ cfclose(cfp *fp)
 	}
 #endif
 
+#ifdef HAVE_LIBZSTD
+	if (fp->zstd.fp)
+	{
+		ZSTD_outBuffer	*output = &fp->zstd.output;
+		ZSTD_inBuffer	*input = &fp->zstd.input;
+		size_t res, cnt;
+
+		if (fp->zstd.cstream)
+		{
+			for (;;)
+			{
+				output->pos = 0;
+				res = ZSTD_compressStream2(fp->zstd.cstream, output, input, ZSTD_e_end);
+				if (ZSTD_isError(res))
+					fatal("could not compress data: %s", ZSTD_getErrorName(res));
+				cnt = fwrite(output->dst, 1, output->pos, fp->zstd.fp);
+				if (cnt != output->pos)
+					fatal("could not write data: %s", strerror(errno));
+				if (res == 0)
+					break;
+			}
+
+			ZSTD_freeCStream(fp->zstd.cstream);
+			pg_free(fp->zstd.output.dst);
+		}
+
+		if (fp->zstd.dstream)
+		{
+			ZSTD_freeDStream(fp->zstd.dstream);
+			pg_free(unconstify(void *, fp->zstd.input.src));
+		}
+
+		result = fclose(fp->zstd.fp);
+		fp->zstd.fp = NULL;
+		return result;
+	}
+#endif
+
 	result = fclose(fp->uncompressedfp);
 	fp->uncompressedfp = NULL;
 	free_keep_errno(fp);
@@ -703,6 +1179,10 @@ cfeof(cfp *fp)
 		return gzeof(fp->compressedfp);
 #endif
 
+#ifdef HAVE_LIBZSTD
+	if (fp->zstd.fp)
+		return feof(fp->zstd.fp);
+#endif
 	return feof(fp->uncompressedfp);
 }
 

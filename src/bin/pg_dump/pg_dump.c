@@ -375,6 +375,12 @@ parse_compression(const char *optarg, Compress *compress)
 				compress->level = atoi(1+eq);
 				compress->level_set = true;
 			}
+			else if (strncmp(optarg, "zstdlong", len) == 0)
+				compress->zstd.longdistance = atoi(1+eq);
+			else if (strncmp(optarg, "checksum", len) == 0)
+				compress->zstd.checksum = atoi(1+eq);
+			else if (strncmp(optarg, "threads", len) == 0)
+				compress->zstd.threads = atoi(1+eq);
 			else
 			{
 				pg_log_error("unknown compression setting: %s", optarg);
@@ -386,11 +392,31 @@ parse_compression(const char *optarg, Compress *compress)
 				break;
 		}
 
+		/* XXX: zstd will check its own compression level later */
+		if (compress->alg != COMPR_ALG_ZSTD)
+		{
+			Compress nullopts = {0};
+
+			if (compress->level < 0 || compress->level > 9)
+			{
+				pg_log_error("compression level must be in range 0..9");
+				exit_nicely(1);
+			}
+
+// XXX: needs to set default alg first
+			if (memcmp(&compress->zstd, &nullopts.zstd, sizeof(nullopts.zstd)) != 0)
+			{
+				pg_log_error("compression option not supported with this algorithm");
+				exit_nicely(1);
+			}
+		}
+
 		if (!compress->level_set)
 		{ // XXX
 			const int default_compress_level[] = {
 				0,			/* COMPR_ALG_NONE */
 				Z_DEFAULT_COMPRESSION,	/* COMPR_ALG_ZLIB */
+				0, // XXX: ZSTD_CLEVEL_DEFAULT,	/* COMPR_ALG_ZSTD */
 			};
 
 			compress->level = default_compress_level[compress->alg];
@@ -778,6 +804,11 @@ main(int argc, char **argv)
 			compress.alg = COMPR_ALG_LIBZ;
 			compress.level = Z_DEFAULT_COMPRESSION;
 #endif
+
+#ifdef HAVE_LIBZSTD
+			compress.alg = COMPR_ALG_ZSTD; // Set default for testing purposes
+			compress.level = ZSTD_CLEVEL_DEFAULT;
+#endif
 		}
 		else
 		{
@@ -788,6 +819,14 @@ main(int argc, char **argv)
 
 #ifndef HAVE_LIBZ
 	if (compress.alg == COMPR_ALG_LIBZ)
+	{
+		pg_log_warning("requested compression not available in this installation -- archive will be uncompressed");
+		compress.alg = 0;
+	}
+#endif
+
+#ifndef HAVE_LIBZSTD
+	if (compress.alg == COMPR_ALG_ZSTD)
 	{
 		pg_log_warning("requested compression not available in this installation -- archive will be uncompressed");
 		compress.alg = 0;

@@ -52,6 +52,10 @@ typedef struct _z_stream
 typedef z_stream *z_streamp;
 #endif
 
+#ifdef HAVE_LIBZSTD
+#include <zstd.h>
+#endif	/* HAVE_LIBZSTD */
+
 /* Data block types */
 #define BLK_DATA 1
 #define BLK_BLOBS 3

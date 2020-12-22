@@ -94,6 +94,7 @@ typedef enum
 		COMPR_ALG_DEFAULT = -1,
 		COMPR_ALG_NONE,
 		COMPR_ALG_LIBZ,
+		COMPR_ALG_ZSTD,
 } CompressionAlgorithm;
 /* Should be called "method" or "library" ? */
 
@@ -105,6 +106,19 @@ typedef struct Compress {
 	 * are all integer, though.
 	*/
 	bool		level_set;
+
+	/*
+	 * This could be a union across all compress algorithms, but
+	 * keeping as separate structs allows checking that options are
+	 * not specified for a different algorithm than selected.
+	 */
+
+	struct {
+		bool		longdistance;
+		bool		checksum;
+		bool		rsyncable;
+		int		threads;
+	} zstd;
 } Compress;
 
 

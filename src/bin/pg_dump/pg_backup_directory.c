@@ -394,8 +394,12 @@ _PrintFileData(ArchiveHandle *AH, char *filename)
 	if (!cfp)
 		fatal("could not open input file \"%s\": %m", filename);
 
-	buf = pg_malloc(ZLIB_OUT_SIZE);
-	buflen = ZLIB_OUT_SIZE;
+	/*
+	 * zstd prefers a 128kB buffer.  The allocation cannot happen in
+	 * cfread, since the "cfp" is an opaque type.
+	 */
+	buf = pg_malloc(128*1024);
+	buflen = 128*1024;
 
 	while ((cnt = cfread(buf, buflen, cfp)))
 	{
