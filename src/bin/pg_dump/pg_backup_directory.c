@@ -202,7 +202,7 @@ InitArchiveFmt_Directory(ArchiveHandle *AH)
 
 		setFilePath(AH, fname, "toc.dat");
 
-		tocFH = cfopen_read(fname, PG_BINARY_R);
+		tocFH = cfopen_read(fname, PG_BINARY_R, &AH->compression);
 		if (tocFH == NULL)
 			fatal("could not open input file \"%s\": %m", fname);
 
@@ -327,7 +327,7 @@ _StartData(ArchiveHandle *AH, TocEntry *te)
 
 	setFilePath(AH, fname, tctx->filename);
 
-	ctx->dataFH = cfopen_write(fname, PG_BINARY_W, AH->compression);
+	ctx->dataFH = cfopen_write(fname, PG_BINARY_W, &AH->compression);
 	if (ctx->dataFH == NULL)
 		fatal("could not open output file \"%s\": %m", fname);
 }
@@ -389,7 +389,7 @@ _PrintFileData(ArchiveHandle *AH, char *filename)
 	if (!filename)
 		return;
 
-	cfp = cfopen_read(filename, PG_BINARY_R);
+	cfp = cfopen_read(filename, PG_BINARY_R, &AH->compression);
 
 	if (!cfp)
 		fatal("could not open input file \"%s\": %m", filename);
@@ -436,12 +436,13 @@ _LoadBlobs(ArchiveHandle *AH)
 	lclContext *ctx = (lclContext *) AH->formatData;
 	char		tocfname[MAXPGPATH];
 	char		line[MAXPGPATH];
+	Compress	nocompression = {0};
 
 	StartRestoreBlobs(AH);
 
 	setFilePath(AH, tocfname, "blobs.toc");
 
-	ctx->blobsTocFH = cfopen_read(tocfname, PG_BINARY_R);
+	ctx->blobsTocFH = cfopen_read(tocfname, PG_BINARY_R, &nocompression);
 
 	if (ctx->blobsTocFH == NULL)
 		fatal("could not open large object TOC file \"%s\" for input: %m",
@@ -574,6 +575,7 @@ _CloseArchive(ArchiveHandle *AH)
 	{
 		cfp		   *tocFH;
 		char		fname[MAXPGPATH];
+		Compress	nocompression = {0};
 
 		setFilePath(AH, fname, "toc.dat");
 
@@ -581,7 +583,7 @@ _CloseArchive(ArchiveHandle *AH)
 		ctx->pstate = ParallelBackupStart(AH);
 
 		/* The TOC is always created uncompressed */
-		tocFH = cfopen_write(fname, PG_BINARY_W, 0);
+		tocFH = cfopen_write(fname, PG_BINARY_W, &nocompression);
 		if (tocFH == NULL)
 			fatal("could not open output file \"%s\": %m", fname);
 		ctx->dataFH = tocFH;
@@ -640,11 +642,12 @@ _StartBlobs(ArchiveHandle *AH, TocEntry *te)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
 	char		fname[MAXPGPATH];
+	Compress	nocompression = {0};
 
 	setFilePath(AH, fname, "blobs.toc");
 
 	/* The blob TOC file is never compressed */
-	ctx->blobsTocFH = cfopen_write(fname, "ab", 0);
+	ctx->blobsTocFH = cfopen_write(fname, "ab", &nocompression);
 	if (ctx->blobsTocFH == NULL)
 		fatal("could not open output file \"%s\": %m", fname);
 }
@@ -662,7 +665,7 @@ _StartBlob(ArchiveHandle *AH, TocEntry *te, Oid oid)
 
 	snprintf(fname, MAXPGPATH, "%s/blob_%u.dat", ctx->directory, oid);
 
-	ctx->dataFH = cfopen_write(fname, PG_BINARY_W, AH->compression);
+	ctx->dataFH = cfopen_write(fname, PG_BINARY_W, &AH->compression);
 
 	if (ctx->dataFH == NULL)
 		fatal("could not open output file \"%s\": %m", fname);

@@ -39,6 +39,7 @@
 #include "pg_backup_archiver.h"
 #include "pg_backup_tar.h"
 #include "pg_backup_utils.h"
+#include "compress_io.h"
 #include "pgtar.h"
 
 static void _ArchiveEntry(ArchiveHandle *AH, TocEntry *te);
@@ -196,10 +197,10 @@ InitArchiveFmt_Tar(ArchiveHandle *AH)
 
 		/*
 		 * We don't support compression because reading the files back is not
-		 * possible since gzdopen uses buffered IO which totally screws file
+		 * possible since gzdopen uses buffered IO which totally screws file XXX
 		 * positioning.
 		 */
-		if (AH->compression != 0)
+		if (AH->compression.alg != COMPR_ALG_NONE)
 			fatal("compression is not supported by tar archive format");
 	}
 	else
@@ -248,14 +249,8 @@ _ArchiveEntry(ArchiveHandle *AH, TocEntry *te)
 	ctx = (lclTocEntry *) pg_malloc0(sizeof(lclTocEntry));
 	if (te->dataDumper != NULL)
 	{
-#ifdef HAVE_LIBZ
-		if (AH->compression == 0)
-			sprintf(fn, "%d.dat", te->dumpId);
-		else
-			sprintf(fn, "%d.dat.gz", te->dumpId);
-#else
-		sprintf(fn, "%d.dat", te->dumpId);
-#endif
+		const char *suffix = compress_suffix(&AH->compression);
+		sprintf(fn, "%d.dat%s", te->dumpId, suffix);
 		ctx->filename = pg_strdup(fn);
 	}
 	else
@@ -346,7 +341,7 @@ tarOpen(ArchiveHandle *AH, const char *filename, char mode)
 
 #ifdef HAVE_LIBZ
 
-		if (AH->compression == 0)
+		if (AH->compression.alg == COMPR_ALG_NONE)
 			tm->nFH = ctx->tarFH;
 		else
 			fatal("compression is not supported by tar archive format");
@@ -407,9 +402,9 @@ tarOpen(ArchiveHandle *AH, const char *filename, char mode)
 
 #ifdef HAVE_LIBZ
 
-		if (AH->compression != 0)
+		if (AH->compression.alg != COMPR_ALG_NONE)
 		{
-			sprintf(fmode, "wb%d", AH->compression);
+			sprintf(fmode, "wb%d", AH->compression.level);
 			tm->zFH = gzdopen(dup(fileno(tm->tmpFH)), fmode);
 			if (tm->zFH == NULL)
 				fatal("could not open temporary file");
@@ -437,7 +432,7 @@ tarClose(ArchiveHandle *AH, TAR_MEMBER *th)
 	/*
 	 * Close the GZ file since we dup'd. This will flush the buffers.
 	 */
-	if (AH->compression != 0)
+	if (AH->compression.alg != COMPR_ALG_NONE)
 	{
 		errno = 0;				/* in case gzclose() doesn't set it */
 		if (GZCLOSE(th->zFH) != 0)
@@ -865,7 +860,7 @@ _CloseArchive(ArchiveHandle *AH)
 		memcpy(ropt, AH->public.ropt, sizeof(RestoreOptions));
 		ropt->filename = NULL;
 		ropt->dropSchema = 1;
-		ropt->compression = 0;
+		ropt->compression.alg = COMPR_ALG_NONE;
 		ropt->superuser = NULL;
 		ropt->suppressDumpWarnings = true;
 
@@ -949,16 +944,12 @@ _StartBlob(ArchiveHandle *AH, TocEntry *te, Oid oid)
 	lclContext *ctx = (lclContext *) AH->formatData;
 	lclTocEntry *tctx = (lclTocEntry *) te->formatData;
 	char		fname[255];
-	char	   *sfx;
+	const char *sfx;
 
 	if (oid == 0)
 		fatal("invalid OID for large object (%u)", oid);
 
-	if (AH->compression != 0)
-		sfx = ".gz";
-	else
-		sfx = "";
-
+	sfx = compress_suffix(&AH->compression);
 	sprintf(fname, "blob_%u.dat%s", oid, sfx);
 
 	tarPrintf(ctx->blobToc, "%u %s\n", oid, fname);

@@ -89,6 +89,25 @@ typedef struct _connParams
 	char	   *override_dbname;
 } ConnParams;
 
+typedef enum
+{
+		COMPR_ALG_DEFAULT = -1,
+		COMPR_ALG_NONE,
+		COMPR_ALG_LIBZ,
+} CompressionAlgorithm;
+/* Should be called "method" or "library" ? */
+
+typedef struct Compress {
+	CompressionAlgorithm	alg;
+	int			level;
+	/* Is a nondefault level set ?  This is useful since different compression
+	 * methods have different "default" levels.  For now we assume the levels
+	 * are all integer, though.
+	*/
+	bool		level_set;
+} Compress;
+
+
 typedef struct _restoreOptions
 {
 	int			createDB;		/* Issue commands to create the database */
@@ -143,7 +162,7 @@ typedef struct _restoreOptions
 
 	int			noDataForFailedTables;
 	int			exit_on_error;
-	int			compression;
+	Compress	compression;
 	int			suppressDumpWarnings;	/* Suppress output of WARNING entries
 										 * to stderr */
 	bool		single_txn;
@@ -303,7 +322,7 @@ extern Archive *OpenArchive(const char *FileSpec, const ArchiveFormat fmt);
 
 /* Create a new archive */
 extern Archive *CreateArchive(const char *FileSpec, const ArchiveFormat fmt,
-							  const int compression, bool dosync, ArchiveMode mode,
+							  Compress *compression, bool dosync, ArchiveMode mode,
 							  SetupWorkerPtrType setupDumpWorker);
 
 /* The --list option */

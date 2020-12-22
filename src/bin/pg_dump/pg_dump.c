@@ -61,6 +61,7 @@
 #include "getopt_long.h"
 #include "libpq/libpq-fs.h"
 #include "parallel.h"
+#include "compress_io.h"
 #include "pg_backup_db.h"
 #include "pg_backup_utils.h"
 #include "pg_dump.h"
@@ -316,6 +317,82 @@ static void setupDumpWorker(Archive *AHX);
 static TableInfo *getRootTableInfo(const TableInfo *tbinfo);
 
 
+/* Parse the string into compression options */
+static void
+parse_compression(const char *optarg, Compress *compress)
+{
+	if (optarg[0] == '0' && optarg[1] == '\0')
+		compress->alg = COMPR_ALG_NONE;
+	else if ((optarg[0] > '0' && optarg[0] <= '9') ||
+		optarg[0] == '-')
+	{
+		compress->alg = COMPR_ALG_LIBZ;
+		compress->level_set = true;
+		compress->level = atoi(optarg);
+		if (optarg[1] != '\0')
+		{
+			pg_log_error("compression level must be in range 0..9");
+			exit_nicely(1);
+		}
+	}
+	else
+	{
+		/* Parse a more flexible string like level=3 alg=zlib opts=long */
+		for (;;)
+		{
+			char *eq = strchr(optarg, '=');
+			int len;
+
+			if (eq == NULL)
+			{
+				pg_log_error("compression options must be key=value: %s", optarg);
+				exit_nicely(1);
+			}
+
+			len = eq - optarg;
+			if (strncmp(optarg, "alg", len) == 0)
+			{
+				if (strchr(eq, ' '))
+					len = strchr(eq, ' ') - eq - 1;
+				else
+					len = strlen(eq) - len;
+				if (strncmp(1+eq, "zlib", len) == 0 ||
+						strncmp(1+eq, "libz", len) == 0)
+					compress->alg = COMPR_ALG_LIBZ;
+				else
+				{
+					pg_log_error("unknown compression algorithm: %s", 1+eq);
+					exit_nicely(1);
+				}
+			}
+			else if (strncmp(optarg, "level", len) == 0)
+			{
+				compress->level = atoi(1+eq);
+				compress->level_set = true;
+			}
+			else
+			{
+				pg_log_error("unknown compression setting: %s", optarg);
+				exit_nicely(1);
+			}
+
+			optarg = strchr(eq, ' ');
+			if (!optarg++)
+				break;
+		}
+
+		if (!compress->level_set)
+		{
+			const int default_compress_level[] = {
+				0,			/* COMPR_ALG_NONE */
+				Z_DEFAULT_COMPRESSION,	/* COMPR_ALG_ZLIB */
+			};
+
+			compress->level = default_compress_level[compress->alg];
+		}
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -336,7 +413,7 @@ main(int argc, char **argv)
 	const char *dumpsnapshot = NULL;
 	char	   *use_role = NULL;
 	int			numWorkers = 1;
-	int			compressLevel = -1;
+	Compress	compress = { .alg = COMPR_ALG_DEFAULT };
 	int			plainText = 0;
 	ArchiveFormat archiveFormat = archUnknown;
 	ArchiveMode archiveMode;
@@ -558,9 +635,7 @@ main(int argc, char **argv)
 				break;
 
 			case 'Z':			/* Compression Level */
-				if (!option_parse_int(optarg, "-Z/--compress", 0, 9,
-									  &compressLevel))
-					exit_nicely(1);
+				parse_compression(optarg, &compress);
 				break;
 
 			case 0:
@@ -690,20 +765,28 @@ main(int argc, char **argv)
 		plainText = 1;
 
 	/* Custom and directory formats are compressed by default, others not */
-	if (compressLevel == -1)
+	if (compress.alg == COMPR_ALG_DEFAULT)
 	{
-#ifdef HAVE_LIBZ
 		if (archiveFormat == archCustom || archiveFormat == archDirectory)
-			compressLevel = Z_DEFAULT_COMPRESSION;
-		else
+		{
+#ifdef HAVE_LIBZ
+			compress.alg = COMPR_ALG_LIBZ;
+			compress.level = Z_DEFAULT_COMPRESSION;
 #endif
-			compressLevel = 0;
+		}
+		else
+		{
+			compress.alg = COMPR_ALG_NONE;
+			compress.level = 0;
+		}
 	}
 
 #ifndef HAVE_LIBZ
-	if (compressLevel != 0)
+	if (compress.alg == COMPR_ALG_LIBZ)
+	{
 		pg_log_warning("requested compression not available in this installation -- archive will be uncompressed");
-	compressLevel = 0;
+		compress.alg = 0;
+	}
 #endif
 
 	/*
@@ -718,7 +801,7 @@ main(int argc, char **argv)
 		fatal("parallel backup only supported by the directory format");
 
 	/* Open the output file */
-	fout = CreateArchive(filename, archiveFormat, compressLevel, dosync,
+	fout = CreateArchive(filename, archiveFormat, &compress, dosync,
 						 archiveMode, setupDumpWorker);
 
 	/* Make dump options accessible right away */
@@ -950,10 +1033,7 @@ main(int argc, char **argv)
 	ropt->sequence_data = dopt.sequence_data;
 	ropt->binary_upgrade = dopt.binary_upgrade;
 
-	if (compressLevel == -1)
-		ropt->compression = 0;
-	else
-		ropt->compression = compressLevel;
+	ropt->compression = compress;
 
 	ropt->suppressDumpWarnings = true;	/* We've already shown them */
 

@@ -43,7 +43,8 @@
 #define GZWRITE(p, s, n, fh) (fwrite(p, s, n, fh) * (s))
 #define GZREAD(p, s, n, fh) fread(p, s, n, fh)
 #define GZEOF(fh)	feof(fh)
-/* this is just the redefinition of a libz constant */
+/* this is just the redefinition of a libz constant, in case zlib isn't
+ * available */
 #define Z_DEFAULT_COMPRESSION (-1)
 
 typedef struct _z_stream
@@ -331,14 +332,7 @@ struct _archiveHandle
 	DumpId	   *tableDataId;	/* TABLE DATA ids, indexed by table dumpId */
 
 	struct _tocEntry *currToc;	/* Used when dumping data */
-	int			compression;	/*---------
-								 * Compression requested on open().
-								 * Possible values for compression:
-								 * -1	Z_DEFAULT_COMPRESSION
-								 *  0	COMPRESSION_NONE
-								 * 1-9 levels for gzip compression
-								 *---------
-								 */
+	Compress	compression;	/* Compression requested on open */
 	bool		dosync;			/* data requested to be synced on sight */
 	ArchiveMode mode;			/* File mode - r or w */
 	void	   *formatData;		/* Header data specific to file format */
