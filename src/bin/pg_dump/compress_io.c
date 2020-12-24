@@ -13,7 +13,7 @@
  * friends, providing an interface similar to those, but abstracts away
  * the possible compression. Both APIs use libz for the compression, but
  * the second API uses gzip headers, so the resulting files can be easily
- * manipulated with the gzip utility.
+ * manipulated with the gzip utility. XXX
  *
  * Compressor API
  * --------------
@@ -41,9 +41,9 @@
  *	libz's gzopen() APIs. It allows you to use the same functions for
  *	compressed and uncompressed streams. cfopen_read() first tries to open
  *	the file with given name, and if it fails, it tries to open the same
- *	file with the .gz suffix. cfopen_write() opens a file for writing, an
+ *	file with a compressed suffix. cfopen_write() opens a file for writing, an
  *	extra argument specifies if the file should be compressed, and adds the
- *	.gz suffix to the filename if so. This allows you to easily handle both
+ *	compressed suffix to the filename if so. This allows you to easily handle both
  *	compressed and uncompressed files.
  *
  * IDENTIFICATION
@@ -646,8 +646,8 @@ WriteDataToArchiveNone(ArchiveHandle *AH, CompressorState *cs,
  */
 
 /*
- * cfp represents an open stream, wrapping the underlying FILE or gzFile
- * pointer. This is opaque to the callers.
+ * cfp represents an open stream, wrapping the underlying compressed or
+ * uncompressed file object.  This is opaque to the callers.
  */
 struct cfp
 {
@@ -687,8 +687,7 @@ free_keep_errno(void *p)
  * be either "r" or "rb".
  *
  * If the file at 'path' does not exist, we search with compressed suffix (if 'path'
- * doesn't already have one) and try again. So if you pass "foo" as 'path',
- * this will open either "foo" or "foo.gz".
+ * doesn't already have one) and try again.
  *
  * On failure, return NULL with an error code in errno.
  */
@@ -745,7 +744,7 @@ cfopen_write(const char *path, const char *mode, Compress *compression)
 }
 
 /*
- * Opens file 'path' in 'mode'. If 'compression' is non-zero, the file
+ * Opens file 'path' in 'mode'. If 'alg' is COMPR_ALG_ZLIB, the file
  * is opened with libz gzopen(), otherwise with plain fopen().
  *
  * On failure, return NULL with an error code in errno.

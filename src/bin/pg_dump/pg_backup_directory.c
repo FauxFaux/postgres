@@ -6,8 +6,8 @@
  *	for the TOC, and a separate file for each data entry, named "<oid>.dat".
  *	Large objects (BLOBs) are stored in separate files named "blob_<oid>.dat",
  *	and there's a plain-text TOC file for them called "blobs.toc". If
- *	compression is used, each data file is individually compressed and the
- *	".gz" suffix is added to the filenames. The TOC files are never
+ *	compression is used, each data file is individually compressed with a
+ *	suffix is added to the filenames. The TOC files are never
  *	compressed by pg_dump, however they are accepted with the .gz suffix too,
  *	in case the user has manually compressed them with 'gzip'.
  *
