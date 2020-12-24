@@ -28,7 +28,7 @@
  *	The interface for reading an archive consists of just one function:
  *	ReadDataFromArchive. ReadDataFromArchive reads the whole compressed input
  *	stream, by repeatedly calling the given ReadFunc. ReadFunc returns the
- *	compressed data chunk at a time, and ReadDataFromArchive decompresses it
+ *	compressed data one chunk at a time, and ReadDataFromArchive decompresses it
  *	and passes the decompressed data to ahwrite(), until ReadFunc returns 0
  *	to signal EOF.
  *
