@@ -30,23 +30,18 @@
 #include "pg_backup.h"
 #include "pqexpbuffer.h"
 
+/* Forward declaration XXX: CIRCULAR */
+typedef struct cfp cfp;
+
 #define LOBBUFSIZE 16384
 
 #ifdef HAVE_LIBZ
 #include <zlib.h>
-#define GZCLOSE(fh) gzclose(fh)
-#define GZWRITE(p, s, n, fh) gzwrite(fh, p, (n) * (s))
-#define GZREAD(p, s, n, fh) gzread(fh, p, (n) * (s))
-#define GZEOF(fh)	gzeof(fh)
 #else
-#define GZCLOSE(fh) fclose(fh)
-#define GZWRITE(p, s, n, fh) (fwrite(p, s, n, fh) * (s))
-#define GZREAD(p, s, n, fh) fread(p, s, n, fh)
-#define GZEOF(fh)	feof(fh)
+
 /* this is just the redefinition of a libz constant, in case zlib isn't
  * available */
 #define Z_DEFAULT_COMPRESSION (-1)
-
 typedef struct _z_stream
 {
 	void	   *next_in;
@@ -320,8 +315,7 @@ struct _archiveHandle
 
 	char	   *fSpec;			/* Archive File Spec */
 	FILE	   *FH;				/* General purpose file handle */
-	void	   *OF;
-	int			gzOut;			/* Output file */
+	cfp	   *OF;				/* Output file (compressed or not) */
 
 	struct _tocEntry *toc;		/* Header of circular list of TOC entries */
 	int			tocCount;		/* Number of TOC entries */

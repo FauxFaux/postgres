@@ -21,6 +21,10 @@
 #define ZLIB_OUT_SIZE	4096
 #define ZLIB_IN_SIZE	4096
 
+/* Forward declaration */
+struct ArchiveHandle;
+typedef struct _archiveHandle ArchiveHandle;
+
 /* Prototype for callback function to WriteDataToArchive() */
 typedef void (*WriteFunc) (ArchiveHandle *AH, const char *buf, size_t len);
 
@@ -58,6 +62,7 @@ extern const struct compressLibs compresslibs[];
 typedef struct cfp cfp;
 
 extern cfp *cfopen(const char *path, const char *mode, Compress *compression);
+extern cfp *cfdopen(int fd, const char *mode, Compress *compression);
 extern cfp *cfopen_read(const char *path, const char *mode, Compress *compression);
 extern cfp *cfopen_write(const char *path, const char *mode, Compress *compression);
 extern int	cfread(void *ptr, int size, cfp *fp);

@@ -540,6 +540,58 @@ cfopen(const char *path, const char *mode, Compress *compression)
 	}
 }
 
+/*
+ * Open a file descriptor, with specified compression.
+ * Returns an opaque cfp object.
+ */
+cfp *
+cfdopen(int fd, const char *mode, Compress *compression)
+{
+	cfp		   *fp = pg_malloc0(sizeof(cfp));
+
+	switch (compression->alg)
+	{
+#ifdef HAVE_LIBZ
+	case COMPR_ALG_LIBZ:
+		if (compression->level != Z_DEFAULT_COMPRESSION)
+		{
+			/* user has specified a compression level, so tell zlib to use it */
+			char		mode_compression[32];
+
+			snprintf(mode_compression, sizeof(mode_compression), "%s%d",
+					 mode, compression->level);
+			fp->compressedfp = gzdopen(fd, mode_compression);
+		}
+		else
+		{
+			/* don't specify a level, just use the zlib default */
+			fp->compressedfp = gzdopen(fd, mode);
+		}
+
+		if (fp->compressedfp == NULL)
+		{
+			free_keep_errno(fp);
+			fp = NULL;
+		}
+		return fp;
+#endif
+
+	case COMPR_ALG_NONE:
+		fp->uncompressedfp = fdopen(fd, mode);
+		if (fp->uncompressedfp == NULL)
+		{
+			free_keep_errno(fp);
+			fp = NULL;
+		}
+		else
+			setvbuf(fp->uncompressedfp, NULL, _IONBF, 0);
+		return fp;
+
+	default:
+		/* Should not happen */
+		fatal("requested compression not available in this installation");
+	}
+}
 
 int
 cfread(void *ptr, int size, cfp *fp)
@@ -616,6 +668,7 @@ cfgets(cfp *fp, char *buf, int len)
 	return fgets(buf, len, fp->uncompressedfp);
 }
 
+/* Close the given compressed or uncompressed stream; return 0 on success. */
 int
 cfclose(cfp *fp)
 {
@@ -629,6 +682,7 @@ cfclose(cfp *fp)
 #ifdef HAVE_LIBZ
 	if (fp->compressedfp)
 	{
+		errno = 0;					/* in case gzclose() doesn't set it */
 		result = gzclose(fp->compressedfp);
 		fp->compressedfp = NULL;
 		return result;
