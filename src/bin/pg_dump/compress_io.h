@@ -47,6 +47,13 @@ extern void WriteDataToArchive(ArchiveHandle *AH, CompressorState *cs,
 							   const void *data, size_t dLen);
 extern void EndCompressor(ArchiveHandle *AH, CompressorState *cs);
 
+struct compressLibs {
+	const CompressionAlgorithm alg;
+	const char	*name;			/* Name in -Z alg= */
+	const char	*suffix;		/* file extension */
+	const int	defaultlevel;	/* Default compression level */
+};
+extern const struct compressLibs compresslibs[];
 
 typedef struct cfp cfp;
 

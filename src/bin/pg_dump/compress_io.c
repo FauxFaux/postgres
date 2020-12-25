@@ -56,6 +56,18 @@
 #include "compress_io.h"
 #include "pg_backup_utils.h"
 
+const struct compressLibs
+compresslibs[] = {
+	{ COMPR_ALG_NONE, "no", "", 0, },
+	{ COMPR_ALG_NONE, "none", "", 0, }, /* Alternate name */
+
+// #ifdef HAVE_LIBZ?
+	{ COMPR_ALG_LIBZ, "libz", ".gz", Z_DEFAULT_COMPRESSION },
+	{ COMPR_ALG_LIBZ, "zlib", ".gz", Z_DEFAULT_COMPRESSION }, /* Alternate name */
+
+	{ 0, NULL, } /* sentinel */
+};
+
 /*----------------------
  * Compressor API
  *----------------------
@@ -401,7 +413,7 @@ struct cfp
 #endif
 };
 
-static int	hasSuffix(const char *filename, const char *suffix);
+static int	hasSuffix(const char *filename);
 
 /* free() without changing errno; useful in several places below */
 static void
@@ -428,7 +440,7 @@ cfopen_read(const char *path, const char *mode, Compress *compression)
 {
 	cfp		   *fp;
 
-	if (hasSuffix(path, ".gz"))
+	if (hasSuffix(path))
 		fp = cfopen(path, mode, compression);
 	else
 	{
@@ -656,18 +668,29 @@ get_cfp_error(cfp *fp)
 	return strerror(errno);
 }
 
+/* Return true iff the filename has a known compression suffix */
 static int
-hasSuffix(const char *filename, const char *suffix)
+hasSuffix(const char *filename)
 {
-	int			filenamelen = strlen(filename);
-	int			suffixlen = strlen(suffix);
+	for (int i = 0; compresslibs[i].name != NULL; ++i)
+	{
+		const char	*suffix = compresslibs[i].suffix;
+		int			filenamelen = strlen(filename);
+		int			suffixlen = strlen(suffix);
 
-	if (filenamelen < suffixlen)
-		return 0;
+		/* COMPR_ALG_NONE has an empty "suffix", which doesn't count */
+		if (suffixlen == 0)
+			continue;
 
-	return memcmp(&filename[filenamelen - suffixlen],
-				  suffix,
-				  suffixlen) == 0;
+		if (filenamelen < suffixlen)
+			continue;
+
+		if (memcmp(&filename[filenamelen - suffixlen],
+					  suffix, suffixlen) == 0)
+			return true;
+	}
+
+	return false;
 }
 
 /*
@@ -677,11 +700,13 @@ hasSuffix(const char *filename, const char *suffix)
 const char *
 compress_suffix(Compress *compression)
 {
-	switch (compression->alg)
+	for (int i = 0; compresslibs[i].name != NULL; ++i)
 	{
-		case COMPR_ALG_LIBZ:
-			return ".gz";
-		default:
-			return "";
+		if (compression->alg != compresslibs[i].alg)
+			continue;
+
+		return compresslibs[i].suffix;
 	}
+
+	return "";
 }

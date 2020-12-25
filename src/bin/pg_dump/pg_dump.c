@@ -337,7 +337,7 @@ parse_compression(const char *optarg, Compress *compress)
 	}
 	else
 	{
-		/* Parse a more flexible string like level=3 alg=zlib opts=long */
+		/* Parse a more flexible string like -Z level=3 -Z alg=zlib -Z checksum=1 */
 		for (;;)
 		{
 			char *eq = strchr(optarg, '=');
@@ -352,14 +352,19 @@ parse_compression(const char *optarg, Compress *compress)
 			len = eq - optarg;
 			if (strncmp(optarg, "alg", len) == 0)
 			{
-				if (strchr(eq, ' '))
-					len = strchr(eq, ' ') - eq - 1;
-				else
-					len = strlen(eq) - len;
-				if (strncmp(1+eq, "zlib", len) == 0 ||
-						strncmp(1+eq, "libz", len) == 0)
-					compress->alg = COMPR_ALG_LIBZ;
-				else
+				len = strlen(eq) - len;
+
+				for (int i = 0; compresslibs[i].name != NULL; ++i)
+				{
+					if (strlen(1+eq) != strlen(compresslibs[i].name))
+						continue;
+					if (strncmp(1+eq, compresslibs[i].name, len) != 0)
+						continue;
+					compress->alg = compresslibs[i].alg;
+					break;
+				}
+
+				if (compress->alg == COMPR_ALG_DEFAULT)
 				{
 					pg_log_error("unknown compression algorithm: %s", 1+eq);
 					exit_nicely(1);
@@ -382,7 +387,7 @@ parse_compression(const char *optarg, Compress *compress)
 		}
 
 		if (!compress->level_set)
-		{
+		{ // XXX
 			const int default_compress_level[] = {
 				0,			/* COMPR_ALG_NONE */
 				Z_DEFAULT_COMPRESSION,	/* COMPR_ALG_ZLIB */

@@ -771,14 +771,20 @@ _PrepParallelRestore(ArchiveHandle *AH)
 		 */
 		setFilePath(AH, fname, tctx->filename);
 
-		if (stat(fname, &st) == 0)
-			te->dataLength = st.st_size;
-		else
+		for (int i = 0; compresslibs[i].name != NULL; ++i)
 		{
-			/* It might be compressed */
-			strlcat(fname, ".gz", sizeof(fname));
-			if (stat(fname, &st) == 0)
-				te->dataLength = st.st_size;
+			char	filename[MAXPGPATH];
+			int	ret;
+
+			snprintf(filename, sizeof(filename), "%s%s", fname,
+					compresslibs[i].suffix);
+
+			ret = stat(fname, &st);
+			if (ret < 0) // && errno == ENOENT)
+				continue;
+
+			te->dataLength = st.st_size;
+			break;
 		}
 
 		/*
