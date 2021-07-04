@@ -72,6 +72,10 @@ struct CompressorState
 	char	   *zlibOut;
 	size_t		zlibOutSize;
 #endif
+
+#ifdef HAVE_LIBZSTD
+  ZSTD_CStream *zstdCStream;
+#endif
 };
 
 static void ParseCompressionOption(int compression, CompressionAlgorithm *alg,
@@ -88,6 +92,17 @@ static void WriteDataToArchiveZlib(ArchiveHandle *AH, CompressorState *cs,
 static void EndCompressorZlib(ArchiveHandle *AH, CompressorState *cs);
 #endif
 
+/* Routines that support zstd compressed data I/O */
+#ifdef HAVE_LIBZ
+static void InitCompressorZstd(CompressorState *cs, int level);
+//static void DeflateCompressorZlib(ArchiveHandle *AH, CompressorState *cs,
+//								  bool flush);
+//static void ReadDataFromArchiveZlib(ArchiveHandle *AH, ReadFunc readF);
+//static void WriteDataToArchiveZlib(ArchiveHandle *AH, CompressorState *cs,
+//								   const char *data, size_t dLen);
+//static void EndCompressorZlib(ArchiveHandle *AH, CompressorState *cs);
+#endif
+
 /* Routines that support uncompressed data I/O */
 static void ReadDataFromArchiveNone(ArchiveHandle *AH, ReadFunc readF);
 static void WriteDataToArchiveNone(ArchiveHandle *AH, CompressorState *cs,
@@ -95,26 +110,30 @@ static void WriteDataToArchiveNone(ArchiveHandle *AH, CompressorState *cs,
 
 /*
  * Interprets a numeric 'compression' value. The algorithm implied by the
- * value (zlib or none at the moment), is returned in *alg, and the
- * zlib compression level in *level.
+ * value is returned in *alg, and the algorithm-specific compression level
+ * in *level.
  */
 static void
 ParseCompressionOption(int compression, CompressionAlgorithm *alg, int *level)
 {
 	if (compression == Z_DEFAULT_COMPRESSION ||
-		(compression > 0 && compression <= 9))
-		*alg = COMPR_ALG_LIBZ;
-	else if (compression == 0)
-		*alg = COMPR_ALG_NONE;
-	else
-	{
+		(compression > 0 && compression <= 9)) {
+    *alg = COMPR_ALG_LIBZ;
+    /* The level is just the passed-in value. */
+    if (level)
+      *level = compression;
+  } else if (compression == 0) {
+    *alg = COMPR_ALG_NONE;
+    if (level)
+      *level = 0;
+  } else if (compression >= 10 && compression <= 31) {
+	  *alg = COMPR_ALG_ZSTD;
+	  if (level)
+	    *level = compression - 9;
+	} else {
 		fatal("invalid compression code: %d", compression);
 		*alg = COMPR_ALG_NONE;	/* keep compiler quiet */
 	}
-
-	/* The level is just the passed-in value. */
-	if (level)
-		*level = compression;
 }
 
 /* Public interface routines */
@@ -134,6 +153,11 @@ AllocateCompressor(int compression, WriteFunc writeF)
 		fatal("not built with zlib support");
 #endif
 
+#ifndef HAVE_LIBZSTD
+	if (alg == COMPR_ALG_ZSTD)
+		fatal("not built with zstd support");
+#endif
+
 	cs = (CompressorState *) pg_malloc0(sizeof(CompressorState));
 	cs->writeF = writeF;
 	cs->comprAlg = alg;
@@ -144,6 +168,11 @@ AllocateCompressor(int compression, WriteFunc writeF)
 #ifdef HAVE_LIBZ
 	if (alg == COMPR_ALG_LIBZ)
 		InitCompressorZlib(cs, level);
+#endif
+
+#ifdef HAVE_LIBZSTD
+	if (alg == COMPR_ALG_ZSTD)
+		InitCompressorZstd(cs, level);
 #endif
 
 	return cs;
@@ -376,6 +405,36 @@ ReadDataFromArchiveZlib(ArchiveHandle *AH, ReadFunc readF)
 }
 #endif							/* HAVE_LIBZ */
 
+#ifdef HAVE_LIBZSTD
+static void
+InitCompressorZstd(CompressorState *cs, int level)
+{
+  cs->zstdCStream = ZSTD_createCStream();
+  ZSTD_initCStream(cs->zstdCStream, level);
+  z_streamp	zp;
+
+  zp = cs->zp = (z_streamp) pg_malloc(sizeof(z_stream));
+  zp->zalloc = Z_NULL;
+  zp->zfree = Z_NULL;
+  zp->opaque = Z_NULL;
+
+  /*
+   * zlibOutSize is the buffer size we tell zlib it can output to.  We
+   * actually allocate one extra byte because some routines want to append a
+   * trailing zero byte to the zlib output.
+   */
+  cs->zlibOut = (char *) pg_malloc(ZLIB_OUT_SIZE + 1);
+  cs->zlibOutSize = ZLIB_OUT_SIZE;
+
+  if (deflateInit(zp, level) != Z_OK)
+    fatal("could not initialize compression library: %s",
+          zp->msg);
+
+  /* Just be paranoid - maybe End is called after Start, with no Write */
+  zp->next_out = (void *) cs->zlibOut;
+  zp->avail_out = cs->zlibOutSize;
+}
+#endif
 
 /*
  * Functions for uncompressed output.

@@ -60,6 +60,10 @@ typedef struct _z_stream
 typedef z_stream *z_streamp;
 #endif
 
+#ifdef HAVE_LIBZSTD
+#include <zstd.h>
+#endif
+
 /* Data block types */
 #define BLK_DATA 1
 #define BLK_BLOBS 3
@@ -341,6 +345,7 @@ struct _archiveHandle
 								 * -1	Z_DEFAULT_COMPRESSION
 								 *  0	COMPRESSION_NONE
 								 * 1-9 levels for gzip compression
+								 * 11-19 lz4 levels 1-9
 								 *---------
 								 */
 	bool		dosync;			/* data requested to be synced on sight */
