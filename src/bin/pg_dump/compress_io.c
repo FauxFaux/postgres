@@ -73,8 +73,12 @@ struct CompressorState
 	size_t		zlibOutSize;
 #endif
 
-#ifdef HAVE_LIBZSTD
-  ZSTD_CStream *zstdCStream;
+#ifdef USE_LZ4
+	LZ4F_cctx *lz4Cctx;
+	/* temporary output buffer; no data stored between write calls */
+	char      *lz4Out;
+	size_t    lz4OutSize;
+	LZ4F_preferences_t lz4Prefs;
 #endif
 };
 
@@ -94,13 +98,11 @@ static void EndCompressorZlib(ArchiveHandle *AH, CompressorState *cs);
 
 /* Routines that support zstd compressed data I/O */
 #ifdef HAVE_LIBZ
-static void InitCompressorZstd(CompressorState *cs, int level);
-//static void DeflateCompressorZlib(ArchiveHandle *AH, CompressorState *cs,
-//								  bool flush);
-//static void ReadDataFromArchiveZlib(ArchiveHandle *AH, ReadFunc readF);
-//static void WriteDataToArchiveZlib(ArchiveHandle *AH, CompressorState *cs,
-//								   const char *data, size_t dLen);
-//static void EndCompressorZlib(ArchiveHandle *AH, CompressorState *cs);
+static void InitCompressorLz4(CompressorState *cs, int level);
+static void ReadDataFromArchiveLz4(ArchiveHandle *AH, ReadFunc readF);
+static void WriteDataToArchiveLz4(ArchiveHandle *AH, CompressorState *cs,
+								   const char *data, size_t dLen);
+static void EndCompressorLz4(ArchiveHandle *AH, CompressorState *cs);
 #endif
 
 /* Routines that support uncompressed data I/O */
@@ -118,18 +120,18 @@ ParseCompressionOption(int compression, CompressionAlgorithm *alg, int *level)
 {
 	if (compression == Z_DEFAULT_COMPRESSION ||
 		(compression > 0 && compression <= 9)) {
-    *alg = COMPR_ALG_LIBZ;
-    /* The level is just the passed-in value. */
-    if (level)
-      *level = compression;
-  } else if (compression == 0) {
-    *alg = COMPR_ALG_NONE;
-    if (level)
-      *level = 0;
-  } else if (compression >= 10 && compression <= 31) {
-	  *alg = COMPR_ALG_ZSTD;
-	  if (level)
-	    *level = compression - 9;
+		*alg = COMPR_ALG_LIBZ;
+		/* The level is just the passed-in value. */
+		if (level)
+			*level = compression;
+	} else if (compression == 0) {
+		*alg = COMPR_ALG_NONE;
+		if (level)
+			*level = 0;
+  } else if (compression >= 11 && compression <= 19) {
+		*alg = COMPR_ALG_LZ4;
+		if (level)
+			*level = compression - 10;
 	} else {
 		fatal("invalid compression code: %d", compression);
 		*alg = COMPR_ALG_NONE;	/* keep compiler quiet */
@@ -153,9 +155,9 @@ AllocateCompressor(int compression, WriteFunc writeF)
 		fatal("not built with zlib support");
 #endif
 
-#ifndef HAVE_LIBZSTD
-	if (alg == COMPR_ALG_ZSTD)
-		fatal("not built with zstd support");
+#ifndef USE_LZ4
+	if (alg == COMPR_ALG_LZ4)
+		fatal("not built with lz4 support");
 #endif
 
 	cs = (CompressorState *) pg_malloc0(sizeof(CompressorState));
@@ -170,9 +172,9 @@ AllocateCompressor(int compression, WriteFunc writeF)
 		InitCompressorZlib(cs, level);
 #endif
 
-#ifdef HAVE_LIBZSTD
-	if (alg == COMPR_ALG_ZSTD)
-		InitCompressorZstd(cs, level);
+#ifdef USE_LZ4
+	if (alg == COMPR_ALG_LZ4)
+		InitCompressorLz4(cs, level);
 #endif
 
 	return cs;
@@ -199,6 +201,14 @@ ReadDataFromArchive(ArchiveHandle *AH, int compression, ReadFunc readF)
 		fatal("not built with zlib support");
 #endif
 	}
+	if (alg == COMPR_ALG_LZ4)
+	{
+#ifdef USE_LZ4
+		ReadDataFromArchiveLz4(AH, readF);
+#else
+		fatal("not built with lz4 support");
+#endif
+	}
 }
 
 /*
@@ -217,6 +227,13 @@ WriteDataToArchive(ArchiveHandle *AH, CompressorState *cs,
 			fatal("not built with zlib support");
 #endif
 			break;
+		case COMPR_ALG_LZ4:
+#ifdef HAVE_LIBZ
+			WriteDataToArchiveLz4(AH, cs, data, dLen);
+#else
+			fatal("not built with lz4 support");
+#endif
+			break;
 		case COMPR_ALG_NONE:
 			WriteDataToArchiveNone(AH, cs, data, dLen);
 			break;
@@ -232,6 +249,10 @@ EndCompressor(ArchiveHandle *AH, CompressorState *cs)
 #ifdef HAVE_LIBZ
 	if (cs->comprAlg == COMPR_ALG_LIBZ)
 		EndCompressorZlib(AH, cs);
+#endif
+#ifdef USE_LZ4
+	if (cs->comprAlg == COMPR_ALG_LZ4)
+		EndCompressorLz4(AH, cs);
 #endif
 	free(cs);
 }
@@ -405,34 +426,99 @@ ReadDataFromArchiveZlib(ArchiveHandle *AH, ReadFunc readF)
 }
 #endif							/* HAVE_LIBZ */
 
-#ifdef HAVE_LIBZSTD
+#ifdef USE_LZ4
 static void
-InitCompressorZstd(CompressorState *cs, int level)
+InitCompressorLz4(CompressorState *cs, int level)
 {
-  cs->zstdCStream = ZSTD_createCStream();
-  ZSTD_initCStream(cs->zstdCStream, level);
-  z_streamp	zp;
+	const LZ4F_errorCode_t err = LZ4F_createCompressionContext(&cs->lz4Cctx, LZ4F_VERSION);
+	if (LZ4F_isError(err)) fatal("unable to initialise lz4 context: %s", LZ4F_getErrorName(err));
 
-  zp = cs->zp = (z_streamp) pg_malloc(sizeof(z_stream));
-  zp->zalloc = Z_NULL;
-  zp->zfree = Z_NULL;
-  zp->opaque = Z_NULL;
+	memset(&cs->lz4Prefs, 0, sizeof(cs->lz4Prefs));
+	cs->lz4Prefs.compressionLevel = level;
 
-  /*
-   * zlibOutSize is the buffer size we tell zlib it can output to.  We
-   * actually allocate one extra byte because some routines want to append a
-   * trailing zero byte to the zlib output.
-   */
-  cs->zlibOut = (char *) pg_malloc(ZLIB_OUT_SIZE + 1);
-  cs->zlibOutSize = ZLIB_OUT_SIZE;
+	cs->lz4OutSize = 0;
+	cs->lz4Out = NULL;
+}
 
-  if (deflateInit(zp, level) != Z_OK)
-    fatal("could not initialize compression library: %s",
-          zp->msg);
+static void
+ReallocBufferForSrcSizeLz4(CompressorState *cs, size_t srcLen) {
+	const size_t needed = LZ4F_compressBound(srcLen, &cs->lz4Prefs);
+	if (needed <= cs->lz4OutSize) return;
+	pg_free(cs->lz4Out);
+	cs->lz4OutSize = needed;
+	cs->lz4Out = pg_malloc(needed);
+}
 
-  /* Just be paranoid - maybe End is called after Start, with no Write */
-  zp->next_out = (void *) cs->zlibOut;
-  zp->avail_out = cs->zlibOutSize;
+static void
+WriteDataToArchiveLz4(ArchiveHandle *AH, CompressorState *cs,
+											const char *data, size_t dLen)
+{
+	// not yet initialised
+	if (cs->lz4OutSize == 0) {
+		char header[LZ4F_HEADER_SIZE_MAX];
+		const size_t size = LZ4F_compressBegin(cs->lz4Cctx, &header, LZ4F_HEADER_SIZE_MAX, &cs->lz4Prefs);
+		if (LZ4F_isError(size)) fatal("unable to start lz4 compression: %s", LZ4F_getErrorName(size));
+		cs->writeF(AH, header, size);
+	}
+
+	ReallocBufferForSrcSizeLz4(cs, dLen);
+
+	const size_t written = LZ4F_compressUpdate(cs->lz4Cctx, cs->lz4Out, cs->lz4OutSize, data, dLen, NULL);
+	if (LZ4F_isError(written)) fatal("unable to update compressor: %s", LZ4F_getErrorName(written));
+
+	cs->writeF(AH, cs->lz4Out, written);
+}
+static void
+EndCompressorLz4(ArchiveHandle *AH, CompressorState *cs) {
+	ReallocBufferForSrcSizeLz4(cs, 0);
+	const size_t written = LZ4F_compressEnd(cs->lz4Cctx, cs->lz4Out, cs->lz4OutSize, NULL);
+	if (LZ4F_isError(written)) fatal("unable to end compressor: %s", LZ4F_getErrorName(written));
+	cs->writeF(AH, cs->lz4Out, written);
+	pg_free(cs->lz4Out);
+	LZ4F_freeCompressionContext(cs->lz4Cctx);
+}
+
+static void
+ReadDataFromArchiveLz4(ArchiveHandle *AH, ReadFunc readF) {
+	LZ4F_dctx *ctx;
+	const LZ4F_errorCode_t createErr = LZ4F_createDecompressionContext(&ctx, LZ4F_VERSION);
+	if (LZ4F_isError(createErr)) fatal("unable to create decompressor: %s", LZ4F_getErrorName(createErr));
+
+	const size_t dstSize = 64 * 1024;
+	char *dst = pg_malloc(dstSize);
+
+	size_t srcSize = 64 * 1024;
+	char *src = pg_malloc(srcSize);
+
+	size_t readHint = 1;
+
+	while (readHint != 0) {
+		size_t readingSize = readF(AH, &src, &srcSize);
+		if (readingSize == 0) fatal("unexpected end of file in lz4 stream");
+
+		char *reading = src;
+
+		while (readingSize != 0) {
+			size_t dstUsed = dstSize;
+			size_t readingUsed = readingSize;
+
+			readHint = LZ4F_decompress(ctx, dst, &dstUsed,
+																 reading, &readingUsed, NULL);
+			if (LZ4F_isError(readHint)) fatal("invalid lz4 data stream: %s", LZ4F_getErrorName(readHint));
+			reading += readingUsed;
+			readingSize -= readingUsed;
+			if (dstUsed) ahwrite(dst, 1, dstUsed, AH);
+
+			// explicit eof, no need for future reads
+			if (readHint == 0) break;
+
+			if (readingSize != 0 && readingUsed == 0) fatal("lz4 made no progress: %z", readingSize);
+		}
+	}
+
+	LZ4F_freeDecompressionContext(ctx);
+	pg_free(dst);
+	pg_free(src);
 }
 #endif
 

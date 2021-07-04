@@ -25,7 +25,7 @@ typedef enum
 {
 	COMPR_ALG_NONE,
 	COMPR_ALG_LIBZ,
-	COMPR_ALG_ZSTD
+	COMPR_ALG_LZ4
 } CompressionAlgorithm;
 
 /* Prototype for callback function to WriteDataToArchive() */

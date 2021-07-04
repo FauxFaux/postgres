@@ -550,9 +550,9 @@ main(int argc, char **argv)
 
 			case 'Z':			/* Compression Level */
 				compressLevel = atoi(optarg);
-				if (compressLevel < 0 || compressLevel > 31)
+				if (compressLevel < 0 || compressLevel > 19)
 				{
-					pg_log_error("compression level must be in range 0..31");
+					pg_log_error("compression level must be in range 0..19");
 					exit_nicely(1);
 				}
 				break;

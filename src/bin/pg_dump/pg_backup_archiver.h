@@ -60,8 +60,8 @@ typedef struct _z_stream
 typedef z_stream *z_streamp;
 #endif
 
-#ifdef HAVE_LIBZSTD
-#include <zstd.h>
+#ifdef USE_LZ4
+#include <lz4frame.h>
 #endif
 
 /* Data block types */
